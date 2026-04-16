@@ -125,7 +125,8 @@ def process_image(p, exe, low, high, threads):
         t1 = time.perf_counter()
         cv_total += (t1 - t0) * 1000.0
     cv_ms = cv_total / NREPS
-
+    cv2.imwrite("original_canny.png", edges_cv)
+    
     # 2. CUDA runner (one call → averages internally, writes canny_output.png + canny_timing.txt)
     if not run_cuda(exe, p, low, high, threads):
         print(f"{bname:<30} {'CUDA FAILED':>11}")

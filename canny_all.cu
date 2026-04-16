@@ -1,11 +1,12 @@
 /*
  * canny_all.cu — Self-contained Canny kernels + CPU hysteresis in one file.
  *
- * Contents:
+ * Pipeline order:
  *   1. gaussian_coarse_4x4      — GPU kernel: fused separable 5x5 Gaussian
  *   2. SobelNMSFixedKernel      — GPU kernel: fused Sobel + NMS + threshold
- *   3. hysteresis_omp_numa      — CPU (OpenMP): NUMA-aware hysteresis
- *   4. final_output             — CPU: map interior (2 -> 255) to binary
+ *   3. remap_and_border         — GPU kernel: remap NMS values + add 1px border
+ *   4. hysteresis_omp_numa      — CPU (OpenMP): NUMA-aware BFS hysteresis
+ *   5. final_output             — CPU: map interior (2 -> 255) to binary
  *
  * Map convention (shared by Sobel/NMS output and hysteresis input):
  *   0 = weak candidate (after remap), 1 = suppressed / border, 2 = strong

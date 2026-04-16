@@ -4,12 +4,12 @@
 
 Contents
 --------
-  canny_all.cu       All pipeline stages + main:
+  canny_all.cu       All pipeline stages + main (execution order):
                        1. gaussian_coarse_4x4        (GPU)
                        2. SobelNMSFixedKernel        (GPU)
-                       3. hysteresis_omp_numa        (CPU, OpenMP)
-                       4. final_output               (CPU)
-                       5. remap_and_border           (GPU)
+                       3. remap_and_border           (GPU)
+                       4. hysteresis_omp_numa        (CPU, OpenMP)
+                       5. final_output               (CPU)
   stb_image.h        Header-only image loader (PNG/JPG/BMP/TIFF)
   stb_image_write.h  Header-only PNG writer
   Makefile           One target: canny_all.x

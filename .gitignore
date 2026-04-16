@@ -1,0 +1,9 @@
+# Compiled binaries
+canny_all.x
+canny_all.exe
+*.o
+
+# Generated output files
+canny_timing.txt
+canny_output.png
+canny_test_results.txt

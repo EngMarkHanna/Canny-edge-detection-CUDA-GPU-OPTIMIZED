@@ -14,6 +14,10 @@ Contents
   stb_image_write.h  Header-only PNG writer
   Makefile           One target: canny_all.x
   test_canny.py      Correctness + timing sweep vs cv2.Canny
+  run_canny_sequence.bash
+                     Quick-run script: runs test_canny.py then
+                     canny_all.x on a single 4K image (low=50,
+                     high=150, threads=8).
   README.txt         This file
 
 Generated files (after running):

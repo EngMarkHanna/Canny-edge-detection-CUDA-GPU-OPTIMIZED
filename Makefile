@@ -1,31 +1,32 @@
-# full_testing/Makefile — Self-contained Canny: all kernels + CPU hysteresis.
-#
-# Usage:
-#   make           # build canny_all.x
-#   make clean     # remove build artifacts + generated output files
-#
-# Run:
-#   ./canny_all.x <image_path> <low> <high> <threads>
-#   python test_canny.py --low 50 --high 150 -T 8 -n 50
-#
-# Windows (MSVC 14.29, from a Developer Command Prompt in this folder):
-#   nvcc canny_all.cu -o canny_all.exe ^
-#       -allow-unsupported-compiler -O2 -Xcompiler "/openmp /O2" ^
-#       -I"C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.29.30133/include"
+all: test
 
-.PHONY: all clean
+# ---
+canny_cuda.o: canny_cuda.cu
+	nvcc `pkg-config --cflags opencv4` -c canny_cuda.cu -o canny_cuda.o
 
-# Xeon Silver 4208 host. `-march=native` picks up everything available.
-CPUFLAGS = -O3 -fopenmp -march=native
+hysteris_cpu.o: hysteris_cpu.cpp
+	g++ -std=c++17 -fopenmp -c hysteris_cpu.cpp `pkg-config --cflags opencv4` -o hysteris_cpu.o
 
-# canny_all.cu pulls in stb_image.h and stb_image_write.h from this folder.
-DEPS = canny_all.cu stb_image.h stb_image_write.h
+test: test.cpp canny_cuda.cpp canny_cuda.o hysteris_cpu.o
+	g++ -std=c++17 -fopenmp test.cpp canny_cuda.cpp canny_cuda.o hysteris_cpu.o \
+		`pkg-config --cflags --libs opencv4` \
+		-L/usr/local/cuda/lib64 -lcudart \
+		-o test
+# ---
 
-all: canny_all.x
+# ---
+# canny_cuda.o: canny_cuda.cu
+# 	nvcc `pkg-config --cflags opencv4` -c canny_cuda.cu -o canny_cuda.o
 
-canny_all.x: $(DEPS)
-	nvcc canny_all.cu -o canny_all.x -O3 -Xcompiler "$(CPUFLAGS)" --resource-usage
+# canny.o: canny.cpp
+# 	g++ -c canny.cpp `pkg-config --cflags opencv4`
+
+# # test: test.cpp canny_cuda.cpp canny_cuda.o
+# test: test.cpp canny_cuda.cpp canny_cuda.o canny.o
+# 	nvcc test.cpp canny_cuda.cpp canny_cuda.o canny.o\
+# 		`pkg-config --cflags --libs opencv4` \
+# 		-o test
+# ---
 
 clean:
-	rm -f canny_all.x canny_all.exe \
-	      canny_timing.txt canny_output.png canny_test_results.txt
+	rm -f *.o test

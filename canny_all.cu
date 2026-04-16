@@ -129,136 +129,222 @@ __global__ void gaussian_coarse_4x4(const unsigned char* __restrict__ in,
  * Grid  : ((W+63)/64, (H+63)/64)
  * =========================================================================== */
 
-#define FIXED_BLOCK_X 16
-#define FIXED_BLOCK_Y 16
-#define FIXED_TILE    68
-#define FIXED_OUT     64
+#define BLOCK_X 16
+#define BLOCK_Y 16
+#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
+#define OUT_TILE 64
+#define IN_TILE 68
+#define IN_UCHAR4_COLS 17
+#define SHMEM_UCHAR4_COLS 20
 
-__global__ void SobelNMSFixedKernel(
-        const unsigned char* __restrict__ src, int width, int height,
-        float high_thresh, float low_thresh,
-        unsigned char* __restrict__ output)
+__device__ __constant__ signed char nms_prev_row[4] = {0, -1, -1, -1};
+__device__ __constant__ signed char nms_prev_col[4] = {-1, 1, 0, -1};
+__device__ __constant__ signed char nms_next_row[4] = {0, 1, 1, 1};
+__device__ __constant__ signed char nms_next_col[4] = {1, -1, 0, 1};
+
+__device__ inline uchar4 load_clamped_uchar4(const unsigned char* src, int width, int gx, int gy)
 {
-    __shared__ unsigned char tile[FIXED_TILE * FIXED_TILE];
+    const unsigned char* row = src + gy * width;
+    const int cx0 = gx < 0 ? 0 : (gx >= width ? width - 1 : gx);
+    const int cx1 = (gx + 1) < 0 ? 0 : ((gx + 1) >= width ? width - 1 : (gx + 1));
+    const int cx2 = (gx + 2) < 0 ? 0 : ((gx + 2) >= width ? width - 1 : (gx + 2));
+    const int cx3 = (gx + 3) < 0 ? 0 : ((gx + 3) >= width ? width - 1 : (gx + 3));
+    return make_uchar4(row[cx0], row[cx1], row[cx2], row[cx3]);
+}
 
-    const int bx  = blockIdx.x * FIXED_OUT;
-    const int by  = blockIdx.y * FIXED_OUT;
-    const int tid = threadIdx.y * FIXED_BLOCK_X + threadIdx.x;
+__device__ inline unsigned char compute_direction_code(int gx, int gy)
+{
+    const float ax = fabsf(static_cast<float>(gx));
+    const float ay = fabsf(static_cast<float>(gy));
+    const unsigned int is_horizontal = static_cast<unsigned int>(ay < ax * 0.41421356237f);
+    const unsigned int is_vertical = static_cast<unsigned int>(ay > ax * 2.41421356237f);
+    const unsigned int is_diagonal = 1u ^ (is_horizontal | is_vertical);
+    const unsigned int same_sign = static_cast<unsigned int>((gx ^ gy) >= 0);
+    return static_cast<unsigned char>((is_vertical << 1) | (is_diagonal * (same_sign ? 3u : 1u)));
+}
 
-    /* Tile load: byte-level, clamp-to-edge replicate. */
-    for (int i = tid; i < FIXED_TILE * FIXED_TILE; i += 256) {
-        int tr = i / FIXED_TILE;
-        int tc = i - tr * FIXED_TILE;
-        int gy = by + tr - 2;
-        int gx = bx + tc - 2;
-        gy = max(0, min(gy, height - 1));
-        gx = max(0, min(gx, width  - 1));
-        tile[i] = src[gy * width + gx];
+__device__ inline int ring_row(int row_idx, signed char delta)
+{
+    return (row_idx + delta + 3) % 3;
+}
+
+__device__ inline unsigned int in_bounds_x(int x, int width)
+{
+    return static_cast<unsigned int>(x) < static_cast<unsigned int>(width);
+}
+
+__global__ __launch_bounds__(256)
+void SobelNMSFusedKernelCorrected(const unsigned char* src,
+                                  int width,
+                                  int height,
+                                  int high_thresh,
+                                  int low_thresh,
+                                  unsigned char* output)
+{
+    __shared__ uchar4 tile[IN_TILE * SHMEM_UCHAR4_COLS];
+
+    const int tid = threadIdx.y * BLOCK_X + threadIdx.x;
+    const int block_input_x = blockIdx.x * OUT_TILE - 2;
+    const int block_input_y = blockIdx.y * OUT_TILE - 2;
+
+    for (int i = tid; i < IN_TILE * IN_UCHAR4_COLS; i += BLOCK_SIZE) {
+        const int row = i / IN_UCHAR4_COLS;
+        const int col = i % IN_UCHAR4_COLS;
+        const int gy = max(0, min(block_input_y + row, height - 1));
+        const int gx = block_input_x + (col << 2);
+
+        if (gx >= 0 && (gx + 3) < width) {
+            const unsigned char* row_ptr = src + gy * width + gx;
+            tile[row * SHMEM_UCHAR4_COLS + col] = make_uchar4(row_ptr[0], row_ptr[1], row_ptr[2], row_ptr[3]);
+        } else {
+            tile[row * SHMEM_UCHAR4_COLS + col] = load_clamped_uchar4(src, width, gx, gy);
+        }
     }
     __syncthreads();
 
-    const int base_tc = threadIdx.x * 4 + 2;   /* first output col in tile coords */
-    const int base_tr = threadIdx.y * 4 + 2;   /* first output row in tile coords */
+    int mags[18];
+    unsigned char prev_dirs[4];
+    unsigned char curr_dirs[4];
 
-    float mag[18];                   /* 3 rows x 6 cols of magnitudes (ring). */
-    int   save_dr[2][4], save_dc[2][4];
+    const int base_row = threadIdx.y << 2;
+    const int sobel_base_x = blockIdx.x * OUT_TILE + (threadIdx.x << 2) - 1;
+    const int sobel_base_y = blockIdx.y * OUT_TILE + base_row - 1;
+    const int out_base_x = sobel_base_x + 1;
 
-    /* Slide a 3-row window over 6 rows (ri=0..5). Output rows = ri 2..5. */
-    for (int ri = 0; ri < 6; ri++) {
-        const int tr   = base_tr - 1 + ri;
-        const int ring = ri % 3;
+    const uchar4* shmem = tile;
+    uchar4 top1 = shmem[base_row * SHMEM_UCHAR4_COLS + threadIdx.x];
+    uchar4 top2 = shmem[base_row * SHMEM_UCHAR4_COLS + threadIdx.x + 1];
+    uchar4 mid1 = shmem[(base_row + 1) * SHMEM_UCHAR4_COLS + threadIdx.x];
+    uchar4 mid2 = shmem[(base_row + 1) * SHMEM_UCHAR4_COLS + threadIdx.x + 1];
 
-        /* Sobel for 6 columns. */
-        for (int ci = 0; ci < 6; ci++) {
-            const int tc = base_tc - 1 + ci;
+    #pragma unroll
+    for (int i = 0; i < 6; ++i) {
+        const uchar4 bot1 = shmem[(base_row + i + 2) * SHMEM_UCHAR4_COLS + threadIdx.x];
+        const uchar4 bot2 = shmem[(base_row + i + 2) * SHMEM_UCHAR4_COLS + threadIdx.x + 1];
+        const int sobel_y = sobel_base_y + i;
+        const bool valid_y = (sobel_y >= 0 && sobel_y < height);
+        const int mag_row = (i % 3) * 6;
+        int gx;
+        int gy;
 
-            float p00 = tile[(tr - 1) * FIXED_TILE + tc - 1];
-            float p01 = tile[(tr - 1) * FIXED_TILE + tc    ];
-            float p02 = tile[(tr - 1) * FIXED_TILE + tc + 1];
-            float p10 = tile[ tr      * FIXED_TILE + tc - 1];
-            float p12 = tile[ tr      * FIXED_TILE + tc + 1];
-            float p20 = tile[(tr + 1) * FIXED_TILE + tc - 1];
-            float p21 = tile[(tr + 1) * FIXED_TILE + tc    ];
-            float p22 = tile[(tr + 1) * FIXED_TILE + tc + 1];
+        gx = -int(top1.x) + int(top1.z) - (int(mid1.x) << 1) + (int(mid1.z) << 1) - int(bot1.x) + int(bot1.z);
+        gy = -int(top1.x) - (int(top1.y) << 1) - int(top1.z) + int(bot1.x) + (int(bot1.y) << 1) + int(bot1.z);
+        mags[mag_row + 0] = (valid_y & in_bounds_x(sobel_base_x + 0, width)) ? (gx * gx + gy * gy) : 0;
 
-            float gx = -p00 + p02 - 2.0f*p10 + 2.0f*p12 - p20 + p22;
-            float gy = -p00 - 2.0f*p01 - p02 + p20 + 2.0f*p21 + p22;
+        gx = -int(top1.y) + int(top1.w) - (int(mid1.y) << 1) + (int(mid1.w) << 1) - int(bot1.y) + int(bot1.w);
+        gy = -int(top1.y) - (int(top1.z) << 1) - int(top1.w) + int(bot1.y) + (int(bot1.z) << 1) + int(bot1.w);
+        mags[mag_row + 1] = (valid_y & in_bounds_x(sobel_base_x + 1, width)) ? (gx * gx + gy * gy) : 0;
+        if (i > 0 && i < 5) {
+            curr_dirs[0] = compute_direction_code(gx, gy);
+        }
 
-            mag[ring * 6 + ci] = sqrtf(gx * gx + gy * gy);
+        gx = -int(top1.z) + int(top2.x) - (int(mid1.z) << 1) + (int(mid2.x) << 1) - int(bot1.z) + int(bot2.x);
+        gy = -int(top1.z) - (int(top1.w) << 1) - int(top2.x) + int(bot1.z) + (int(bot1.w) << 1) + int(bot2.x);
+        mags[mag_row + 2] = (valid_y & in_bounds_x(sobel_base_x + 2, width)) ? (gx * gx + gy * gy) : 0;
+        if (i > 0 && i < 5) {
+            curr_dirs[1] = compute_direction_code(gx, gy);
+        }
 
-            if (ci >= 1 && ci <= 4 && ri >= 1 && ri <= 4) {
-                float agx = fabsf(gx), agy = fabsf(gy);
-                int dr, dc;
-                if (agy < 0.41421356f * agx) {
-                    dr = 0; dc = 1;
-                } else if (agy > 2.41421356f * agx) {
-                    dr = 1; dc = 0;
-                } else if (gx * gy > 0.0f) {
-                    dr = 1; dc = 1;
-                } else {
-                    dr = 1; dc = -1;
+        gx = -int(top1.w) + int(top2.y) - (int(mid1.w) << 1) + (int(mid2.y) << 1) - int(bot1.w) + int(bot2.y);
+        gy = -int(top1.w) - (int(top2.x) << 1) - int(top2.y) + int(bot1.w) + (int(bot2.x) << 1) + int(bot2.y);
+        mags[mag_row + 3] = (valid_y & in_bounds_x(sobel_base_x + 3, width)) ? (gx * gx + gy * gy) : 0;
+        if (i > 0 && i < 5) {
+            curr_dirs[2] = compute_direction_code(gx, gy);
+        }
+
+        gx = -int(top2.x) + int(top2.z) - (int(mid2.x) << 1) + (int(mid2.z) << 1) - int(bot2.x) + int(bot2.z);
+        gy = -int(top2.x) - (int(top2.y) << 1) - int(top2.z) + int(bot2.x) + (int(bot2.y) << 1) + int(bot2.z);
+        mags[mag_row + 4] = (valid_y & in_bounds_x(sobel_base_x + 4, width)) ? (gx * gx + gy * gy) : 0;
+        if (i > 0 && i < 5) {
+            curr_dirs[3] = compute_direction_code(gx, gy);
+        }
+
+        gx = -int(top2.y) + int(top2.w) - (int(mid2.y) << 1) + (int(mid2.w) << 1) - int(bot2.y) + int(bot2.w);
+        gy = -int(top2.y) - (int(top2.z) << 1) - int(top2.w) + int(bot2.y) + (int(bot2.z) << 1) + int(bot2.w);
+        mags[mag_row + 5] = (valid_y & in_bounds_x(sobel_base_x + 5, width)) ? (gx * gx + gy * gy) : 0;
+
+        if (i >= 2) {
+            const int out_y = sobel_base_y + (i - 1);
+            if (out_y > 0 && out_y < (height - 1)) {
+                const int center_row = (i - 1) % 3;
+                unsigned char* dst = output + out_y * width + out_base_x;
+                unsigned char dir;
+                int mag, prev_mag,next_mag;
+                unsigned char is_max;
+                unsigned char keep_low, keep_high;
+
+                if (out_base_x > 0 && out_base_x < (width - 1)) {
+                    dir = prev_dirs[0];
+                    mag = mags[center_row * 6 + 1];
+                    prev_mag =
+                        mags[ring_row(center_row, nms_prev_row[dir]) * 6 +
+                             1 + nms_prev_col[dir]];
+                    next_mag =
+                        mags[ring_row(center_row, nms_next_row[dir]) * 6 +
+                             1 + nms_next_col[dir]];
+                    is_max = (mag > prev_mag) && (mag >= next_mag);
+                    keep_low = is_max & (mag >= low_thresh);
+                    keep_high = is_max & (mag >= high_thresh);
+                    dst[0] = keep_low + keep_high;
                 }
-                save_dr[ri & 1][ci - 1] = dr;
-                save_dc[ri & 1][ci - 1] = dc;
+
+                if ((out_base_x + 1) > 0 && (out_base_x + 1) < (width - 1)) {
+                    dir = prev_dirs[1];
+                    mag = mags[center_row * 6 + 2];
+                    prev_mag =
+                        mags[ring_row(center_row, nms_prev_row[dir]) * 6 +
+                             2 + nms_prev_col[dir]];
+                    next_mag =
+                        mags[ring_row(center_row, nms_next_row[dir]) * 6 +
+                             2 + nms_next_col[dir]];
+                    is_max = (mag > prev_mag) && (mag >= next_mag);
+                    keep_low = is_max & (mag >= low_thresh);
+                    keep_high = is_max & (mag >= high_thresh);
+                    dst[1] = keep_low + keep_high;
+                }
+
+                if ((out_base_x + 2) > 0 && (out_base_x + 2) < (width - 1)) {
+                    dir = prev_dirs[2];
+                    mag = mags[center_row * 6 + 3];
+                    prev_mag =
+                        mags[ring_row(center_row, nms_prev_row[dir]) * 6 +
+                             3 + nms_prev_col[dir]];
+                    next_mag =
+                        mags[ring_row(center_row, nms_next_row[dir]) * 6 +
+                             3 + nms_next_col[dir]];
+                    is_max = (mag > prev_mag) && (mag >= next_mag);
+                    keep_low = is_max & (mag >= low_thresh);
+                    keep_high = is_max & (mag >= high_thresh);
+                    dst[2] = keep_low + keep_high;
+                }
+
+                if ((out_base_x + 3) > 0 && (out_base_x + 3) < (width - 1)) {
+                    dir = prev_dirs[3];
+                    mag = mags[center_row * 6 + 4];
+                    prev_mag =
+                        mags[ring_row(center_row, nms_prev_row[dir]) * 6 +
+                             4 + nms_prev_col[dir]];
+                    next_mag =
+                        mags[ring_row(center_row, nms_next_row[dir]) * 6 +
+                             4 + nms_next_col[dir]];
+                    is_max = (mag > prev_mag) && (mag >= next_mag);
+                    keep_low = is_max & (mag >= low_thresh);
+                    keep_high = is_max & (mag >= high_thresh);
+                    dst[3] = keep_low + keep_high;
+                }
             }
         }
 
-        /* NMS on previous row (ri-1), once ring has 3 rows loaded. */
-        if (ri >= 2) {
-            const int nms_ring   = (ri - 1) % 3;
-            const int ring_above = (nms_ring + 2) % 3;
-            const int ring_below = ri % 3;
-            const int buf        = (ri - 1) & 1;
-
-            const int out_row  = ri - 2;
-            const int global_y = by + threadIdx.y * 4 + out_row;
-            const int global_x = bx + threadIdx.x * 4;
-
-            uint32_t out_buf = 0;
-
-            for (int ci = 1; ci <= 4; ci++) {
-                int dr = save_dr[buf][ci - 1];
-                int dc = save_dc[buf][ci - 1];
-
-                float m = mag[nms_ring * 6 + ci];
-
-                int n1_row = global_y - dr;
-                int n1_col = global_x + (ci - 1) - dc;
-                int n2_row = global_y + dr;
-                int n2_col = global_x + (ci - 1) + dc;
-
-                int r1 = (dr == 0 || (n1_row >= 0 && n1_row < height))
-                         ? ((dr == 0) ? nms_ring : ring_above) : nms_ring;
-                int c1 = (n1_col >= 0 && n1_col < width) ? (ci - dc) : ci;
-
-                int r2 = (dr == 0 || (n2_row >= 0 && n2_row < height))
-                         ? ((dr == 0) ? nms_ring : ring_below) : nms_ring;
-                int c2 = (n2_col >= 0 && n2_col < width) ? (ci + dc) : ci;
-
-                float n1 = mag[r1 * 6 + c1];
-                float n2 = mag[r2 * 6 + c2];
-
-                unsigned char val = 0;
-                if (m >= n1 && m >= n2) {
-                    if      (m > high_thresh) val = 2;
-                    else if (m > low_thresh)  val = 1;
-                }
-                out_buf |= ((uint32_t)val) << ((ci - 1) * 8);
-            }
-
-            if (global_y < height) {
-                int addr = global_y * width + global_x;
-                if (global_x + 3 < width && (addr & 3) == 0) {
-                    *reinterpret_cast<uint32_t*>(&output[addr]) = out_buf;
-                } else {
-                    for (int k = 0; k < 4; k++) {
-                        if (global_x + k < width)
-                            output[addr + k] = (unsigned char)((out_buf >> (k * 8)) & 0xFF);
-                    }
-                }
-            }
-        }
+        prev_dirs[0] = curr_dirs[0];
+        prev_dirs[1] = curr_dirs[1];
+        prev_dirs[2] = curr_dirs[2];
+        prev_dirs[3] = curr_dirs[3];
+        top1 = mid1;
+        top2 = mid2;
+        mid1 = bot1;
+        mid2 = bot2;
     }
+    
 }
 
 /* ===========================================================================
@@ -383,6 +469,8 @@ int main(int argc, char** argv)
     const char* img_path    = argv[1];
     float       low_thresh  = (float)std::atof(argv[2]);
     float       high_thresh = (float)std::atof(argv[3]);
+    int         h_thresh = ((int)high_thresh) * ((int)high_thresh);
+    int         l_thresh  = ((int)low_thresh) * ((int)low_thresh);
     int         num_threads = std::atoi(argv[4]);
 
     /* =================================================================
@@ -419,9 +507,9 @@ int main(int argc, char** argv)
     /* --- grid/block configs --- */
     dim3 gauss_blk(16, 16);
     dim3 gauss_grd((W + 63) / 64, (H + 63) / 64);
-    dim3 nms_blk(FIXED_BLOCK_X, FIXED_BLOCK_Y);
-    dim3 nms_grd((W + FIXED_OUT - 1) / FIXED_OUT,
-                 (H + FIXED_OUT - 1) / FIXED_OUT);
+    dim3 nms_blk(BLOCK_X, BLOCK_Y);
+    dim3 nms_grd((W + OUT_TILE - 1) / OUT_TILE,
+                 (H + OUT_TILE - 1) / OUT_TILE);
     dim3 map_blk(16, 16);
     dim3 map_grd((mapW + 15) / 16, (mapH + 15) / 16);
 
@@ -430,8 +518,8 @@ int main(int argc, char** argv)
      * ================================================================= */
     cudaMemcpy(d_in, h_in, N, cudaMemcpyHostToDevice);
     gaussian_coarse_4x4<<<gauss_grd, gauss_blk>>>(d_in, d_blur, W, H);
-    SobelNMSFixedKernel<<<nms_grd, nms_blk>>>(d_blur, W, H,
-                                              high_thresh, low_thresh, d_nms);
+    SobelNMSFusedKernelCorrected<<<nms_grd, nms_blk>>>(d_blur, W, H,
+                                              (int)h_thresh, (int)l_thresh, d_nms);
     remap_and_border<<<map_grd, map_blk>>>(d_nms, W, H, d_map, mapW, mapH);
     cudaDeviceSynchronize();
 
@@ -470,8 +558,8 @@ int main(int argc, char** argv)
         cudaEventRecord(ev_g1);
 
         /* Sobel + NMS (remap folded in — must finish before D2H) */
-        SobelNMSFixedKernel<<<nms_grd, nms_blk>>>(d_blur, W, H,
-                                                  high_thresh, low_thresh, d_nms);
+        SobelNMSFusedKernelCorrected<<<nms_grd, nms_blk>>>(d_blur, W, H,
+                                                  (int)h_thresh, (int)l_thresh, d_nms);
         remap_and_border<<<map_grd, map_blk>>>(d_nms, W, H, d_map, mapW, mapH);
         cudaEventRecord(ev_nms1);
 

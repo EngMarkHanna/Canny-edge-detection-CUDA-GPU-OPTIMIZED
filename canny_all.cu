@@ -262,7 +262,33 @@ __global__ void SobelNMSFixedKernel(
 }
 
 /* ===========================================================================
- * 3. CPU NUMA-aware hysteresis (OpenMP).
+ * 3. Remap NMS output -> hysteresis map convention + 1-pixel border of 1s.
+ *
+ *   NMS out:  0 = suppressed, 1 = weak,      2 = strong
+ *   Map:      0 = weak,       1 = suppressed/border, 2 = strong
+ *
+ * Map buffer is (W+2) x (H+2).
+ * =========================================================================== */
+
+__global__ void remap_and_border(const unsigned char* __restrict__ nms,
+                                 int W, int H,
+                                 unsigned char* __restrict__ map,
+                                 int mapW, int mapH)
+{
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= mapW || y >= mapH) return;
+
+    if (x == 0 || x == mapW - 1 || y == 0 || y == mapH - 1) {
+        map[y * mapW + x] = 1;
+        return;
+    }
+    unsigned char v = nms[(y - 1) * W + (x - 1)];
+    map[y * mapW + x] = (v == 2) ? (unsigned char)2 : (unsigned char)(1 - v);
+}
+
+/* ===========================================================================
+ * 4. CPU NUMA-aware hysteresis (OpenMP).
  * ===========================================================================
  * Per-thread local queues + CAS-dedup enqueue. proc_bind(close) packs the
  * team on one socket so the shared map stays hot in that socket's L3.
@@ -320,7 +346,7 @@ void hysteresis_omp_numa(unsigned char* map, int mapW, int mapH, int num_threads
 }
 
 /* ===========================================================================
- * 4. Final output: map interior (W+2)x(H+2) -> binary WxH. 2 -> 255, else 0.
+ * 5. Final output: map interior (W+2)x(H+2) -> binary WxH. 2 -> 255, else 0.
  * =========================================================================== */
 
 void final_output(const unsigned char* map, int mapW,
@@ -333,32 +359,6 @@ void final_output(const unsigned char* map, int mapW,
         for (int x = 0; x < W; ++x)
             pdst[x] = (pmap[x] == 2) ? (unsigned char)255 : (unsigned char)0;
     }
-}
-
-/* ===========================================================================
- * 5. Remap NMS output -> hysteresis map convention + 1-pixel border of 1s.
- *
- *   NMS out:  0 = suppressed, 1 = weak,      2 = strong
- *   Map:      0 = weak,       1 = suppressed/border, 2 = strong
- *
- * Map buffer is (W+2) x (H+2).
- * =========================================================================== */
-
-__global__ void remap_and_border(const unsigned char* __restrict__ nms,
-                                 int W, int H,
-                                 unsigned char* __restrict__ map,
-                                 int mapW, int mapH)
-{
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
-    if (x >= mapW || y >= mapH) return;
-
-    if (x == 0 || x == mapW - 1 || y == 0 || y == mapH - 1) {
-        map[y * mapW + x] = 1;
-        return;
-    }
-    unsigned char v = nms[(y - 1) * W + (x - 1)];
-    map[y * mapW + x] = (v == 2) ? (unsigned char)2 : (unsigned char)(1 - v);
 }
 
 /* ===========================================================================

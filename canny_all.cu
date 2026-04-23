@@ -134,16 +134,16 @@ __global__ void gaussian_coarse_4x4(const unsigned char* __restrict__ in,
 
 #define BLOCK_X 32
 #define BLOCK_Y 16
-#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
-#define OUT_TILE_X (BLOCK_X*4)
-#define OUT_TILE_Y (BLOCK_Y*4) 
-#define GAUS_TILE_X (OUT_TILE_X + 4)
-#define GAUS_TILE_Y (OUT_TILE_Y + 4)
-#define IN_TILE_X (OUT_TILE_X + 8)
-#define IN_TILE_Y (OUT_TILE_Y + 8)
-#define GAUS_UCHAR4_COLS (GAUS_TILE_X / 4)
-#define IN_UCHAR4_COLS (IN_TILE_X / 4)
-#define GAUS_SIZE ((BLOCK_X+1)*(BLOCK_Y+1)) 
+#define BLOCK_SIZE 512
+#define OUT_TILE_X 128
+#define OUT_TILE_Y 64 
+#define GAUS_TILE_X 132
+#define GAUS_TILE_Y 68
+#define IN_TILE_X 136
+#define IN_TILE_Y 72
+#define GAUS_UCHAR4_COLS 33
+#define IN_UCHAR4_COLS 34
+#define GAUS_SIZE 561 
 
 __device__ __constant__ signed char nms_prev_row[4] = {0, -1, -1, -1};
 __device__ __constant__ signed char nms_prev_col[4] = {-1, 1, 0, -1};
@@ -181,7 +181,7 @@ __device__ inline unsigned int in_bounds_x(int x, int width)
     return static_cast<unsigned int>(x) < static_cast<unsigned int>(width);
 }
 
-__global__ __launch_bounds__(256)
+__global__ __launch_bounds__(512, 1)
 void SobelNMSFusedKernelCorrected(const unsigned char* src,
                                   int width,
                                   int height,
@@ -215,16 +215,16 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
     // Each thread can do more than 1 block
     for (int i = tid ; i < GAUS_SIZE; i += BLOCK_SIZE){
       // i-> current tile 
-      int tile_x = i % GAUS_UCHAR4_COLS;
-      int tile_y = i / GAUS_UCHAR4_COLS;
+      const int tile_x = i % GAUS_UCHAR4_COLS;
+      const int tile_y = i / GAUS_UCHAR4_COLS * 4;
       float buffer[16] = {0.0f};
       
       const uchar4* shmem = tile_in;
       // produce 4x4 strided gaussian
       for (int j = 0; j< 8; j++){
         // read row
-        const uchar4 row1 = shmem[(tile_y+j)*IN_UCHAR4_COLS + tile_x*4];
-        const uchar4 row2 = shmem[(tile_y+j)*IN_UCHAR4_COLS + tile_x*4 + 1];
+        const uchar4 row1 = shmem[(tile_y+j)*IN_UCHAR4_COLS + tile_x];
+        const uchar4 row2 = shmem[(tile_y+j)*IN_UCHAR4_COLS + tile_x + 1];
         // Do 1D horizontal
         float row_buffer[4] = {0.0f};
         
@@ -252,32 +252,36 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
         // add to vertical
         // row 1 
         if (j < 5){
+          #pragma unroll
           for (int k = 0; k < 4; k ++){
             buffer[k] += row_buffer[k] * c_gauss_1d[j%5];
           }        
         }
         // row 2
         if (j >= 1 && j < 6){
+          #pragma unroll
           for (int k = 0; k < 4; k ++){
             buffer[k+4] += row_buffer[k] * c_gauss_1d[(j-1)%5];
           }        
         }
         // row 3        
         if (j >= 2 && j < 7){
+          #pragma unroll
           for (int k = 0; k < 4; k ++){
             buffer[k+8] += row_buffer[k] * c_gauss_1d[(j-2)%5];
           }        
         }  
         // row 4      
         if (j >= 3){
+          #pragma unroll
           for (int k = 0; k < 4; k ++){
             buffer[k+12] += row_buffer[k] * c_gauss_1d[(j-3)%5];
           }        
         }           
       }  
       // Once gaussian tile done write to shared memory
+      #pragma unroll
       for (int j = 0; j < 4; j++){
-        int ty = j / 4;
         unsigned char r0 = (unsigned char)(buffer[j*4 + 0] + 0.5f);
         unsigned char r1 = (unsigned char)(buffer[j*4 + 1] + 0.5f);
         unsigned char r2 = (unsigned char)(buffer[j*4 + 2] + 0.5f);
@@ -296,17 +300,15 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
     const int sobel_base_y = blockIdx.y * OUT_TILE_Y + base_row - 1;
     const int out_base_x = sobel_base_x + 1;
 
-    const uchar4* shmem = tile_gaus;
-    uchar4 top1 = shmem[base_row * GAUS_UCHAR4_COLS + threadIdx.x];
-    uchar4 top2 = shmem[base_row * GAUS_UCHAR4_COLS + threadIdx.x + 1];
-    uchar4 mid1 = shmem[(base_row + 1) * GAUS_UCHAR4_COLS + threadIdx.x];
-    uchar4 mid2 = shmem[(base_row + 1) * GAUS_UCHAR4_COLS + threadIdx.x + 1];
+    uchar4 top1 = tile_gaus[base_row * GAUS_UCHAR4_COLS + threadIdx.x];
+    uchar4 top2 = tile_gaus[base_row * GAUS_UCHAR4_COLS + threadIdx.x + 1];
+    uchar4 mid1 = tile_gaus[(base_row + 1) * GAUS_UCHAR4_COLS + threadIdx.x];
+    uchar4 mid2 = tile_gaus[(base_row + 1) * GAUS_UCHAR4_COLS + threadIdx.x + 1];
 
     for (int i = 0; i < 6; ++i) {
-        const uchar4 bot1 = shmem[(base_row + i + 2) * GAUS_UCHAR4_COLS + threadIdx.x];
-        const uchar4 bot2 = shmem[(base_row + i + 2) * GAUS_UCHAR4_COLS + threadIdx.x + 1];
-        const int sobel_y = sobel_base_y + i;
-        const bool valid_y = (sobel_y >= 0 && sobel_y < height);
+        const uchar4 bot1 = tile_gaus[(base_row + i + 2) * GAUS_UCHAR4_COLS + threadIdx.x];
+        const uchar4 bot2 = tile_gaus[(base_row + i + 2) * GAUS_UCHAR4_COLS + threadIdx.x + 1];
+        const bool valid_y = ((sobel_base_y + i) >= 0 && (sobel_base_y + i) < height);
         const int mag_row = (i % 3) * 6;
         int gx;
         int gy;
@@ -590,7 +592,7 @@ int main(int argc, char** argv)
     /* --- grid/block configs --- */
     dim3 gauss_blk(32, 16);
     dim3 gauss_grd((W + 63) / 64, (H + 63) / 64);
-    dim3 nms_blk(BLOCK_X, BLOCK_Y);
+    dim3 nms_blk(32, 16);
     dim3 nms_grd((W + OUT_TILE_X - 1) / OUT_TILE_X,
                  (H + OUT_TILE_Y - 1) / OUT_TILE_Y);
     dim3 map_blk(16, 16);

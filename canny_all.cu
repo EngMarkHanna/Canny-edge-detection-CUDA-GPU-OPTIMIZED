@@ -45,79 +45,79 @@
 #define GAUSSIAN_KSIZE 5
 #define GAUSSIAN_KRAD  2
 
-__constant__ float c_gauss_1d[5] = {
+__device__ __constant__ float c_gauss_1d[5] = {
     0.11023f, 0.23680f, 0.30594f, 0.23680f, 0.11023f
 };
-__global__ __launch_bounds__(512)
-__global__ void gaussian_coarse_4x4(const unsigned char* __restrict__ in,
-                                    unsigned char*       __restrict__ out,
-                                    int W, int H)
-{
-    const int TPX   = 2;
-    const int TPY   = 4;
-    const int BDX   = 32;
-    const int BDY   = 16;
-    const int BX    = BDX * TPX;              /* 64 */
-    const int BY    = BDY * TPY;              /* 64 */
-    const int TX    = BX + 2 * GAUSSIAN_KRAD; /* 68 */
-    const int TY    = BY + 2 * GAUSSIAN_KRAD; /* 68 */
-    const int SHZ_S = BX;                 /* 64 padded stride */
-
-    __shared__ unsigned char s_in[TY * TX];
-    __shared__ float         s_hz[TY * SHZ_S];
-
-    const int tx  = threadIdx.x;
-    const int ty  = threadIdx.y;
-    const int bx  = blockIdx.x * BX;
-    const int by  = blockIdx.y * BY;
-    const int tid = ty * BDX + tx;
-    const int bs  = BDX * BDY;
-
-    /* Step 1: cooperative 68x68 tile load (clamp-to-edge). */
-    for (int i = tid; i < TX * TY; i += bs) {
-        int tr = i / TX;
-        int tc = i - tr * TX;
-        int ir = by + tr - GAUSSIAN_KRAD;
-        int ic = bx + tc - GAUSSIAN_KRAD;
-        ir = max(0, min(ir, H - 1));
-        ic = max(0, min(ic, W - 1));
-        s_in[i] = __ldg(&in[ir * W + ic]);
-    }
-    __syncthreads();
-
-    /* Step 2: cooperative horizontal blur -> s_hz (68 rows x 64 cols). */
-    for (int i = tid; i < TY * BX; i += bs) {
-        int hr = i / BX;
-        int hc = i - hr * BX;
-        float s = 0.0f;
-        #pragma unroll
-        for (int kx = 0; kx < GAUSSIAN_KSIZE; kx++)
-            s += (float)s_in[hr * TX + hc + kx] * c_gauss_1d[kx];
-        s_hz[hr * SHZ_S + hc] = s;
-    }
-    __syncthreads();
-
-    /* Step 3: each thread writes 4x4 strided output pixels. */
-    #pragma unroll
-    for (int k = 0; k < TPY; k++) {
-        int or_ = by + ty + k * BDY;
-        if (or_ >= H) continue;
-
-        #pragma unroll
-        for (int l = 0; l < TPX; l++) {
-            int oc = bx + tx + l * BDX;
-            if (oc >= W) continue;
-
-            float s = 0.0f;
-            #pragma unroll
-            for (int ky = 0; ky < GAUSSIAN_KSIZE; ky++)
-                s += s_hz[(ty + k * BDY + ky) * SHZ_S + tx + l * BDX]
-                     * c_gauss_1d[ky];
-
-            out[or_ * W + oc] = (unsigned char)(s + 0.5f);
-        }
-    }
-}
+//__global__ __launch_bounds__(512)
+//__global__ void gaussian_coarse_4x4(const unsigned char* __restrict__ in,
+//                                    unsigned char*       __restrict__ out,
+//                                    int W, int H)
+//{
+//    const int TPX   = 2;
+//    const int TPY   = 4;
+//    const int BDX   = 32;
+//    const int BDY   = 16;
+//    const int BX    = BDX * TPX;              /* 64 */
+//    const int BY    = BDY * TPY;              /* 64 */
+//    const int TX    = BX + 2 * GAUSSIAN_KRAD; /* 68 */
+//    const int TY    = BY + 2 * GAUSSIAN_KRAD; /* 68 */
+//    const int SHZ_S = BX;                 /* 64 padded stride */
+//
+//    __shared__ unsigned char s_in[TY * TX];
+//    __shared__ float         s_hz[TY * SHZ_S];
+//
+//    const int tx  = threadIdx.x;
+//    const int ty  = threadIdx.y;
+//    const int bx  = blockIdx.x * BX;
+//    const int by  = blockIdx.y * BY;
+//    const int tid = ty * BDX + tx;
+//    const int bs  = BDX * BDY;
+//
+//    /* Step 1: cooperative 68x68 tile load (clamp-to-edge). */
+//    for (int i = tid; i < TX * TY; i += bs) {
+//        int tr = i / TX;
+//        int tc = i - tr * TX;
+//        int ir = by + tr - GAUSSIAN_KRAD;
+//        int ic = bx + tc - GAUSSIAN_KRAD;
+//        ir = max(0, min(ir, H - 1));
+//        ic = max(0, min(ic, W - 1));
+//        s_in[i] = __ldg(&in[ir * W + ic]);
+//    }
+//    __syncthreads();
+//
+//    /* Step 2: cooperative horizontal blur -> s_hz (68 rows x 64 cols). */
+//    for (int i = tid; i < TY * BX; i += bs) {
+//        int hr = i / BX;
+//        int hc = i - hr * BX;
+//        float s = 0.0f;
+//        #pragma unroll
+//        for (int kx = 0; kx < GAUSSIAN_KSIZE; kx++)
+//            s += (float)s_in[hr * TX + hc + kx] * c_gauss_1d[kx];
+//        s_hz[hr * SHZ_S + hc] = s;
+//    }
+//    __syncthreads();
+//
+//    /* Step 3: each thread writes 4x4 strided output pixels. */
+//    #pragma unroll
+//    for (int k = 0; k < TPY; k++) {
+//        int or_ = by + ty + k * BDY;
+//        if (or_ >= H) continue;
+//
+//        #pragma unroll
+//        for (int l = 0; l < TPX; l++) {
+//            int oc = bx + tx + l * BDX;
+//            if (oc >= W) continue;
+//
+//            float s = 0.0f;
+//            #pragma unroll
+//            for (int ky = 0; ky < GAUSSIAN_KSIZE; ky++)
+//                s += s_hz[(ty + k * BDY + ky) * SHZ_S + tx + l * BDX]
+//                     * c_gauss_1d[ky];
+//
+//            out[or_ * W + oc] = (unsigned char)(s + 0.5f);
+//        }
+//    }
+//}
 
 /* ===========================================================================
  * 2. Fused Sobel + NMS + double-threshold.
@@ -132,20 +132,25 @@ __global__ void gaussian_coarse_4x4(const unsigned char* __restrict__ in,
  * Grid  : ((W+63)/64, (H+63)/64)
  * =========================================================================== */
 
-#define BLOCK_X 16
+#define BLOCK_X 32
 #define BLOCK_Y 16
-#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
-#define OUT_TILE 64
-#define IN_TILE 68
-#define IN_UCHAR4_COLS 17
-#define SHMEM_UCHAR4_COLS 20
+#define BLOCK_SIZE 512
+#define OUT_TILE_X 128
+#define OUT_TILE_Y 64 
+#define GAUS_TILE_X 132
+#define GAUS_TILE_Y 68
+#define IN_TILE_X 136
+#define IN_TILE_Y 72
+#define GAUS_UCHAR4_COLS 33
+#define IN_UCHAR4_COLS 34
+#define GAUS_SIZE 561 
 
 __device__ __constant__ signed char nms_prev_row[4] = {0, -1, -1, -1};
 __device__ __constant__ signed char nms_prev_col[4] = {-1, 1, 0, -1};
 __device__ __constant__ signed char nms_next_row[4] = {0, 1, 1, 1};
 __device__ __constant__ signed char nms_next_col[4] = {1, -1, 0, 1};
 
-__device__ inline uchar4 load_clamped_uchar4(const unsigned char* src, int width, int gx, int gy)
+__device__ __forceinline__ uchar4 load_clamped_uchar4(const unsigned char* src, int width, int gx, int gy)
 {
     const unsigned char* row = src + gy * width;
     const int cx0 = gx < 0 ? 0 : (gx >= width ? width - 1 : gx);
@@ -155,7 +160,7 @@ __device__ inline uchar4 load_clamped_uchar4(const unsigned char* src, int width
     return make_uchar4(row[cx0], row[cx1], row[cx2], row[cx3]);
 }
 
-__device__ inline unsigned char compute_direction_code(int gx, int gy)
+__device__ __forceinline__ unsigned char compute_direction_code(int gx, int gy)
 {
     const float ax = fabsf(static_cast<float>(gx));
     const float ay = fabsf(static_cast<float>(gy));
@@ -166,17 +171,17 @@ __device__ inline unsigned char compute_direction_code(int gx, int gy)
     return static_cast<unsigned char>((is_vertical << 1) | (is_diagonal * (same_sign ? 3u : 1u)));
 }
 
-__device__ inline int ring_row(int row_idx, signed char delta)
+__device__ __forceinline__ int ring_row(int row_idx, signed char delta)
 {
     return (row_idx + delta + 3) % 3;
 }
 
-__device__ inline unsigned int in_bounds_x(int x, int width)
+__device__ __forceinline__ unsigned int in_bounds_x(int x, int width)
 {
     return static_cast<unsigned int>(x) < static_cast<unsigned int>(width);
 }
 
-__global__ __launch_bounds__(256)
+__global__ __launch_bounds__(512, 2)
 void SobelNMSFusedKernelCorrected(const unsigned char* src,
                                   int width,
                                   int height,
@@ -184,13 +189,15 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
                                   int low_thresh,
                                   unsigned char* output)
 {
-    __shared__ uchar4 tile[IN_TILE * SHMEM_UCHAR4_COLS];
-
+    __shared__ uchar4 tile_in[IN_TILE_Y * IN_UCHAR4_COLS];
+    __shared__ uchar4 tile_gaus[GAUS_TILE_Y * GAUS_UCHAR4_COLS];
+    
     const int tid = threadIdx.y * BLOCK_X + threadIdx.x;
-    const int block_input_x = blockIdx.x * OUT_TILE - 2;
-    const int block_input_y = blockIdx.y * OUT_TILE - 2;
-
-    for (int i = tid; i < IN_TILE * IN_UCHAR4_COLS; i += BLOCK_SIZE) {
+    const int block_input_x = blockIdx.x * OUT_TILE_X - 4;
+    const int block_input_y = blockIdx.y * OUT_TILE_Y - 4;
+    
+    // Unchanged load behavior(just loading more from global)
+    for (int i = tid; i < IN_TILE_Y * IN_UCHAR4_COLS; i += BLOCK_SIZE) {
         const int row = i / IN_UCHAR4_COLS;
         const int col = i % IN_UCHAR4_COLS;
         const int gy = max(0, min(block_input_y + row, height - 1));
@@ -198,10 +205,90 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
 
         if (gx >= 0 && (gx + 3) < width) {
             const unsigned char* row_ptr = src + gy * width + gx;
-            tile[row * SHMEM_UCHAR4_COLS + col] = make_uchar4(row_ptr[0], row_ptr[1], row_ptr[2], row_ptr[3]);
+            tile_in[row * IN_UCHAR4_COLS + col] = make_uchar4(row_ptr[0], row_ptr[1], row_ptr[2], row_ptr[3]);
         } else {
-            tile[row * SHMEM_UCHAR4_COLS + col] = load_clamped_uchar4(src, width, gx, gy);
+            tile_in[row * IN_UCHAR4_COLS + col] = load_clamped_uchar4(src, width, gx, gy);
         }
+    }
+    __syncthreads();
+    
+    // Each thread can do more than 1 block
+    #pragma unroll
+    for (int i = tid ; i < GAUS_SIZE; i += BLOCK_SIZE){
+      // i-> current tile 
+      const int tile_x = i % GAUS_UCHAR4_COLS;
+      const int tile_y = i / GAUS_UCHAR4_COLS * 4;
+      float buffer[16] = {0.0f};
+      
+      const uchar4* shmem = tile_in;
+      // produce 4x4 strided gaussian
+      for (int j = 0; j< 8; j++){
+        // read row
+        const uchar4 row1 = shmem[(tile_y+j)*IN_UCHAR4_COLS + tile_x];
+        const uchar4 row2 = shmem[(tile_y+j)*IN_UCHAR4_COLS + tile_x + 1];
+        // Do 1D horizontal
+        float row_buffer[4] = {0.0f};
+        
+        row_buffer[0] = (c_gauss_1d[0] * float(row1.x) + 
+              c_gauss_1d[1] * float(row1.y) + 
+              c_gauss_1d[2] * float(row1.z) + 
+              c_gauss_1d[3] * float(row1.w) + 
+              c_gauss_1d[4] * float(row2.x));
+        row_buffer[1] = (c_gauss_1d[0] * float(row1.y) + 
+              c_gauss_1d[1] * float(row1.z) + 
+              c_gauss_1d[2] * float(row1.w) + 
+              c_gauss_1d[3] * float(row2.x) + 
+              c_gauss_1d[4] * float(row2.y));
+        row_buffer[2] = (c_gauss_1d[0] * float(row1.z) + 
+              c_gauss_1d[1] * float(row1.w) + 
+              c_gauss_1d[2] * float(row2.x) + 
+              c_gauss_1d[3] * float(row2.y) + 
+              c_gauss_1d[4] * float(row2.z));
+        row_buffer[3] = (c_gauss_1d[0] * float(row1.w) + 
+              c_gauss_1d[1] * float(row2.x) + 
+              c_gauss_1d[2] * float(row2.y) + 
+              c_gauss_1d[3] * float(row2.z) + 
+              c_gauss_1d[4] * float(row2.w));
+        
+        // add to vertical
+        // row 1 
+        if (j < 5){
+          #pragma unroll
+          for (int k = 0; k < 4; k ++){
+            buffer[k] += row_buffer[k] * c_gauss_1d[j%5];
+          }        
+        }
+        // row 2
+        if (j >= 1 && j < 6){
+          #pragma unroll
+          for (int k = 0; k < 4; k ++){
+            buffer[k+4] += row_buffer[k] * c_gauss_1d[(j-1)%5];
+          }        
+        }
+        // row 3        
+        if (j >= 2 && j < 7){
+          #pragma unroll
+          for (int k = 0; k < 4; k ++){
+            buffer[k+8] += row_buffer[k] * c_gauss_1d[(j-2)%5];
+          }        
+        }  
+        // row 4      
+        if (j >= 3){
+          #pragma unroll
+          for (int k = 0; k < 4; k ++){
+            buffer[k+12] += row_buffer[k] * c_gauss_1d[(j-3)%5];
+          }        
+        }           
+      }  
+      // Once gaussian tile done write to shared memory
+      #pragma unroll
+      for (int j = 0; j < 4; j++){
+        unsigned char r0 = (unsigned char)(buffer[j*4 + 0] + 0.5f);
+        unsigned char r1 = (unsigned char)(buffer[j*4 + 1] + 0.5f);
+        unsigned char r2 = (unsigned char)(buffer[j*4 + 2] + 0.5f);
+        unsigned char r3 = (unsigned char)(buffer[j*4 + 3] + 0.5f);
+        tile_gaus[(tile_y+j)*GAUS_UCHAR4_COLS + tile_x] = make_uchar4(r0, r1, r2, r3);
+      }   
     }
     __syncthreads();
 
@@ -210,22 +297,20 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
     unsigned char curr_dirs[4];
 
     const int base_row = threadIdx.y << 2;
-    const int sobel_base_x = blockIdx.x * OUT_TILE + (threadIdx.x << 2) - 1;
-    const int sobel_base_y = blockIdx.y * OUT_TILE + base_row - 1;
+    const int sobel_base_x = blockIdx.x * OUT_TILE_X + (threadIdx.x << 2) - 1;
+    const int sobel_base_y = blockIdx.y * OUT_TILE_Y + base_row - 1;
     const int out_base_x = sobel_base_x + 1;
 
-    const uchar4* shmem = tile;
-    uchar4 top1 = shmem[base_row * SHMEM_UCHAR4_COLS + threadIdx.x];
-    uchar4 top2 = shmem[base_row * SHMEM_UCHAR4_COLS + threadIdx.x + 1];
-    uchar4 mid1 = shmem[(base_row + 1) * SHMEM_UCHAR4_COLS + threadIdx.x];
-    uchar4 mid2 = shmem[(base_row + 1) * SHMEM_UCHAR4_COLS + threadIdx.x + 1];
-
+    uchar4 top1 = tile_gaus[base_row * GAUS_UCHAR4_COLS + threadIdx.x];
+    uchar4 top2 = tile_gaus[base_row * GAUS_UCHAR4_COLS + threadIdx.x + 1];
+    uchar4 mid1 = tile_gaus[(base_row + 1) * GAUS_UCHAR4_COLS + threadIdx.x];
+    uchar4 mid2 = tile_gaus[(base_row + 1) * GAUS_UCHAR4_COLS + threadIdx.x + 1];
+    
     #pragma unroll
     for (int i = 0; i < 6; ++i) {
-        const uchar4 bot1 = shmem[(base_row + i + 2) * SHMEM_UCHAR4_COLS + threadIdx.x];
-        const uchar4 bot2 = shmem[(base_row + i + 2) * SHMEM_UCHAR4_COLS + threadIdx.x + 1];
-        const int sobel_y = sobel_base_y + i;
-        const bool valid_y = (sobel_y >= 0 && sobel_y < height);
+        const uchar4 bot1 = tile_gaus[(base_row + i + 2) * GAUS_UCHAR4_COLS + threadIdx.x];
+        const uchar4 bot2 = tile_gaus[(base_row + i + 2) * GAUS_UCHAR4_COLS + threadIdx.x + 1];
+        const bool valid_y = ((sobel_base_y + i) >= 0 && (sobel_base_y + i) < height);
         const int mag_row = (i % 3) * 6;
         int gx;
         int gy;
@@ -270,25 +355,23 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
             const int out_y = sobel_base_y + (i - 1);
             if (out_y > 0 && out_y < (height - 1)) {
                 const int center_row = (i - 1) % 3;
-                unsigned char* dst = output + out_y * width + out_base_x;
-                unsigned char dir;
+                unsigned char* dst = output + (out_y+1) * (width+2) + out_base_x + 1;
+                char dir;
                 int mag, prev_mag, next_mag;
-                unsigned char is_max;
-                unsigned char keep_low, keep_high;
+                bool check[3];
 
                 if (out_base_x > 0 && out_base_x < (width - 1)) {
-                    dir = prev_dirs[0];
                     mag = mags[center_row * 6 + 1];
                     prev_mag =
-                        mags[ring_row(center_row, nms_prev_row[dir]) * 6 +
-                             1 + nms_prev_col[dir]];
+                        mags[ring_row(center_row, nms_prev_row[prev_dirs[0]]) * 6 +
+                             1 + nms_prev_col[prev_dirs[0]]];
                     next_mag =
-                        mags[ring_row(center_row, nms_next_row[dir]) * 6 +
-                             1 + nms_next_col[dir]];
-                    is_max = (mag > prev_mag) && (mag >= next_mag);
-                    keep_low = is_max & (mag >= low_thresh);
-                    keep_high = is_max & (mag >= high_thresh);
-                    dst[0] = keep_low + keep_high;
+                        mags[ring_row(center_row, nms_next_row[prev_dirs[0]]) * 6 +
+                             1 + nms_next_col[prev_dirs[0]]];
+                    check[0] = (mag >= prev_mag) && (mag >= next_mag);
+                    check[1] = check[0] & (mag >= low_thresh);
+                    check[2] = check[0] & (mag >= high_thresh);
+                    dst[0] = check[2] ? 255 : (check[1] ? 1 : 0);
                 }
 
                 if ((out_base_x + 1) > 0 && (out_base_x + 1) < (width - 1)) {
@@ -300,10 +383,10 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
                     next_mag =
                         mags[ring_row(center_row, nms_next_row[dir]) * 6 +
                              2 + nms_next_col[dir]];
-                    is_max = (mag > prev_mag) && (mag >= next_mag);
-                    keep_low = is_max & (mag >= low_thresh);
-                    keep_high = is_max & (mag >= high_thresh);
-                    dst[1] = keep_low + keep_high;
+                    check[0] = (mag >= prev_mag) && (mag >= next_mag);
+                    check[1] = check[0] & (mag >= low_thresh);
+                    check[2] = check[0] & (mag >= high_thresh);
+                    dst[1] = check[2] ? 255 : (check[1] ? 1 : 0);
                 }
 
                 if ((out_base_x + 2) > 0 && (out_base_x + 2) < (width - 1)) {
@@ -315,10 +398,10 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
                     next_mag =
                         mags[ring_row(center_row, nms_next_row[dir]) * 6 +
                              3 + nms_next_col[dir]];
-                    is_max = (mag > prev_mag) && (mag >= next_mag);
-                    keep_low = is_max & (mag >= low_thresh);
-                    keep_high = is_max & (mag >= high_thresh);
-                    dst[2] = keep_low + keep_high;
+                    check[0] = (mag >= prev_mag) && (mag >= next_mag);
+                    check[1] = check[0] & (mag >= low_thresh);
+                    check[2] = check[0] & (mag >= high_thresh);
+                    dst[2] = check[2] ? 255 : (check[1] ? 1 : 0);
                 }
 
                 if ((out_base_x + 3) > 0 && (out_base_x + 3) < (width - 1)) {
@@ -330,10 +413,10 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
                     next_mag =
                         mags[ring_row(center_row, nms_next_row[dir]) * 6 +
                              4 + nms_next_col[dir]];
-                    is_max = (mag > prev_mag) && (mag >= next_mag);
-                    keep_low = is_max & (mag >= low_thresh);
-                    keep_high = is_max & (mag >= high_thresh);
-                    dst[3] = keep_low + keep_high;
+                    check[0] = (mag >= prev_mag) && (mag >= next_mag);
+                    check[1] = check[0] & (mag >= low_thresh);
+                    check[2] = check[0] & (mag >= high_thresh);
+                    dst[3] = check[2] ? 255 : (check[1] ? 1 : 0);
                 }
             }
         }
@@ -349,6 +432,7 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
     }
 }
 
+
 /* ===========================================================================
  * 3. Remap NMS output -> hysteresis map convention + 1-pixel border of 1s.
  *
@@ -357,7 +441,7 @@ void SobelNMSFusedKernelCorrected(const unsigned char* src,
  *
  * Map buffer is (W+2) x (H+2).
  * =========================================================================== */
-
+/*
 __global__ void remap_and_border(const unsigned char* __restrict__ nms,
                                  int W, int H,
                                  unsigned char* __restrict__ map,
@@ -374,7 +458,7 @@ __global__ void remap_and_border(const unsigned char* __restrict__ nms,
     unsigned char v = nms[(y - 1) * W + (x - 1)];
     map[y * mapW + x] = (v == 2) ? (unsigned char)2 : (unsigned char)(1 - v);
 }
-
+*/
 /* ===========================================================================
  * 4. CPU NUMA-aware hysteresis (OpenMP).
  * ===========================================================================
@@ -383,6 +467,7 @@ __global__ void remap_and_border(const unsigned char* __restrict__ nms,
  * The only map transition is 0 -> 2; single-byte stores are atomic on x86,
  * so the CAS is only used to deduplicate frontier enqueues.
  * =========================================================================== */
+
 
 static inline bool cas_u8(unsigned char* p, unsigned char expected, unsigned char desired)
 {
@@ -413,7 +498,7 @@ void hysteresis_omp_numa(unsigned char* map, int mapW, int mapH, int num_threads
         for (int y = 1; y < mapH - 1; ++y) {
             unsigned char* row = map + y * mapW;
             for (int x = 1; x < mapW - 1; ++x)
-                if (row[x] == 2) q.push_back(row + x);
+                if (row[x] == 255) q.push_back(row + x);
         }
         #pragma omp barrier
 
@@ -421,14 +506,14 @@ void hysteresis_omp_numa(unsigned char* map, int mapW, int mapH, int num_threads
            to promote the 8 neighbors 0 -> 2 via CAS; winners are enqueued. */
         while (!q.empty()) {
             unsigned char* m = q.back(); q.pop_back();
-            if (m[-s - 1] == 0 && cas_u8(m - s - 1, 0, 2)) q.push_back(m - s - 1);
-            if (m[-s    ] == 0 && cas_u8(m - s,     0, 2)) q.push_back(m - s    );
-            if (m[-s + 1] == 0 && cas_u8(m - s + 1, 0, 2)) q.push_back(m - s + 1);
-            if (m[-1    ] == 0 && cas_u8(m - 1,     0, 2)) q.push_back(m - 1    );
-            if (m[ 1    ] == 0 && cas_u8(m + 1,     0, 2)) q.push_back(m + 1    );
-            if (m[ s - 1] == 0 && cas_u8(m + s - 1, 0, 2)) q.push_back(m + s - 1);
-            if (m[ s    ] == 0 && cas_u8(m + s,     0, 2)) q.push_back(m + s    );
-            if (m[ s + 1] == 0 && cas_u8(m + s + 1, 0, 2)) q.push_back(m + s + 1);
+            if (m[-s - 1] == 1 && cas_u8(m - s - 1, 1, 255)) q.push_back(m - s - 1);
+            if (m[-s    ] == 1 && cas_u8(m - s,     1, 255)) q.push_back(m - s    );
+            if (m[-s + 1] == 1 && cas_u8(m - s + 1, 1, 255)) q.push_back(m - s + 1);
+            if (m[-1    ] == 1 && cas_u8(m - 1,     1, 255)) q.push_back(m - 1    );
+            if (m[ 1    ] == 1 && cas_u8(m + 1,     1, 255)) q.push_back(m + 1    );
+            if (m[ s - 1] == 1 && cas_u8(m + s - 1, 1, 255)) q.push_back(m + s - 1);
+            if (m[ s    ] == 1 && cas_u8(m + s,     1, 255)) q.push_back(m + s    );
+            if (m[ s + 1] == 1 && cas_u8(m + s + 1, 1, 255)) q.push_back(m + s + 1);
         }
     }
 }
@@ -445,7 +530,7 @@ void final_output(const unsigned char* map, int mapW,
         const unsigned char* pmap = map + (y + 1) * mapW + 1;
         unsigned char* pdst = dst + y * W;
         for (int x = 0; x < W; ++x)
-            pdst[x] = (pmap[x] == 2) ? (unsigned char)255 : (unsigned char)0;
+            pdst[x] = (pmap[x] == 1) ? 0 : pmap[x];
     }
 }
 
@@ -503,15 +588,15 @@ int main(int argc, char** argv)
                   *d_nms = nullptr, *d_map  = nullptr;
     cudaMalloc(&d_in,   N);
     cudaMalloc(&d_blur, N);
-    cudaMalloc(&d_nms,  N);
+    cudaMalloc(&d_nms,  mapN);
     cudaMalloc(&d_map,  mapN);
 
     /* --- grid/block configs --- */
     dim3 gauss_blk(32, 16);
     dim3 gauss_grd((W + 63) / 64, (H + 63) / 64);
-    dim3 nms_blk(BLOCK_X, BLOCK_Y);
-    dim3 nms_grd((W + OUT_TILE - 1) / OUT_TILE,
-                 (H + OUT_TILE - 1) / OUT_TILE);
+    dim3 nms_blk(32, 16);
+    dim3 nms_grd((W + OUT_TILE_X - 1) / OUT_TILE_X,
+                 (H + OUT_TILE_Y - 1) / OUT_TILE_Y);
     dim3 map_blk(16, 16);
     dim3 map_grd((mapW + 15) / 16, (mapH + 15) / 16);
 
@@ -519,10 +604,12 @@ int main(int argc, char** argv)
      *  Step 2: warmup
      * ================================================================= */
     cudaMemcpy(d_in, h_in, N, cudaMemcpyHostToDevice);
-    gaussian_coarse_4x4<<<gauss_grd, gauss_blk>>>(d_in, d_blur, W, H);
-    SobelNMSFusedKernelCorrected<<<nms_grd, nms_blk>>>(d_blur, W, H,
+    cudaMemset(d_nms, 0, mapN*sizeof(unsigned char));
+
+    //gaussian_coarse_4x4<<<gauss_grd, gauss_blk>>>(d_in, d_blur, W, H);
+    SobelNMSFusedKernelCorrected<<<nms_grd, nms_blk>>>(d_in, W, H,
                                               h_thresh, l_thresh, d_nms);
-    remap_and_border<<<map_grd, map_blk>>>(d_nms, W, H, d_map, mapW, mapH);
+    //remap_and_border<<<map_grd, map_blk>>>(d_nms, W, H, d_map, mapW, mapH);
     cudaDeviceSynchronize();
 
     /* Warm up the OpenMP thread pool so we don't pay pool creation in timing. */
@@ -553,21 +640,23 @@ int main(int argc, char** argv)
         /* H2D */
         cudaEventRecord(ev_h2d0);
         cudaMemcpy(d_in, h_in, N, cudaMemcpyHostToDevice);
+        cudaMemset(d_nms, 0, mapN*sizeof(unsigned char));
+
         cudaEventRecord(ev_h2d1);
 
         /* Gaussian */
-        gaussian_coarse_4x4<<<gauss_grd, gauss_blk>>>(d_in, d_blur, W, H);
+        //gaussian_coarse_4x4<<<gauss_grd, gauss_blk>>>(d_in, d_blur, W, H);
         cudaEventRecord(ev_g1);
 
         /* Sobel + NMS (remap folded in — must finish before D2H) */
-        SobelNMSFusedKernelCorrected<<<nms_grd, nms_blk>>>(d_blur, W, H,
+        SobelNMSFusedKernelCorrected<<<nms_grd, nms_blk>>>(d_in, W, H,
                                                   h_thresh, l_thresh, d_nms);
-        remap_and_border<<<map_grd, map_blk>>>(d_nms, W, H, d_map, mapW, mapH);
+        //remap_and_border<<<map_grd, map_blk>>>(d_nms, W, H, d_map, mapW, mapH);
         cudaEventRecord(ev_nms1);
 
         /* D2H */
         cudaEventRecord(ev_d2h0);
-        cudaMemcpy(h_map, d_map, mapN, cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_map, d_nms, mapN, cudaMemcpyDeviceToHost);
         cudaEventRecord(ev_d2h1);
         cudaEventSynchronize(ev_d2h1);
 

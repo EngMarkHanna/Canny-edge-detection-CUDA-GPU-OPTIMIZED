@@ -28,4 +28,5 @@ canny_all.x: $(DEPS)
 
 clean:
 	rm -f canny_all.x canny_all.exe \
-	      canny_timing.txt canny_output.png canny_test_results.txt
+	      canny_timing.txt canny_output.png canny_test_results.txt \
+        *.sqlite *.nsys-rep
